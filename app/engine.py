@@ -14,7 +14,7 @@ from .features import (
     compute_tod_baseline,
     attach_tod_residuals,
 )
-from .model import IsoForestModel
+from .model import IsoForestModel, MultiIsoForest
 from .rules import apply_simple_delta_rules
 
 # Import check
@@ -36,7 +36,7 @@ from .log import logger
 class Engine:
     def __init__(self):
         self.q = Queue(maxsize=100)
-        self.model = IsoForestModel()
+        self.model = MultiIsoForest()
         self._temp_tod_ref = None # cache
         self._temp_tod_last_build = None # cache
 
@@ -121,11 +121,11 @@ class Engine:
                 continue
 
             # Train on historical feats (neighbor_gap not required for training)
-            self.model.fit_if_needed(feat_m)
+            self.model.fit_if_needed(metric, feat_m)
 
             g = g.copy()
             # Score NEEDS neighbor_gap -> present in 'g'
-            g["score"] = self.model.score(g)
+            g["score"] = self.model.score(metric, g)
 
             # Neighbor coherence from this timestamp snapshot (kept for observability)
             idx = g.set_index("station_id")
