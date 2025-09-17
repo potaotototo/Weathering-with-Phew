@@ -56,7 +56,7 @@ class Settings(BaseModel):
         }
     )
 
-    # Rain event rules
+    # Rain 
     rain_onset_min_intervals: int = 2
     rain_onset_min_total_mm: float = 0.2
     rain_intense_total_mm: float = 2.0
@@ -65,8 +65,27 @@ class Settings(BaseModel):
     rain_trend_window: int = 3
     rain_drop_pct_for_easing: float = 0.5
     rain_cooldown_minutes: int = 20
+    rain_onset_tick_mm: float = 0.2       # tick ≥ 0.2 mm for onset (sustained logic in rules)
+    rain_onset_S15_mm: float = 0.5        # OR 15-min sum ≥ 0.5 mm
+    rain_intense_tick_mm: float = 2.0     # tick ≥ 2.0 mm → INTENSE
+    rain_intense_S15_mm: float = 3.0      # OR 15-min sum ≥ 3.0 mm
+    rain_stitch_gap: int = 1              # treat single zero gap as still raining
 
-    # Optional API key
+    # Temperature
+    tod_baseline_lookback_days: int = 14  # days of history to build minute-of-day baselines
+    temp_z_tod_hi: float = 3.0            # alert if z_tod ≥ 3 (sustained in rules)
+    temp_z_tod_lo: float = -3.0           # alert if z_tod ≤ -3
+    temp_delta_min_abs: float = 0.2       # require small absolute change to avoid flat noise
+
+    # Wind speed 
+    wind_strong_kn: float = 12.0          # ≥12 kn → WIND_STRONG (sustained N ticks)
+    wind_very_strong_kn: float = 20.0     # ≥20 kn → WIND_VERY_STRONG
+    wind_sustain_ticks: int = 2
+
+    # Notifications
+    telegram_bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
+
+    # API key
     x_api_key: Optional[str] = os.getenv("DATA_GOV_SG_API_KEY")
 
 settings = Settings()
