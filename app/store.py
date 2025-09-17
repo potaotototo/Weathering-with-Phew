@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from typing import Iterable, Tuple, List
 from .config import settings
 from .log import logger
@@ -116,15 +117,21 @@ def get_readings_since(metric: str, since_iso: str) -> List[Tuple[str,str,str,fl
         ).fetchall()
     return rows
 
-def get_alerts(metric: str = None, since: str = None):
-    q = ("SELECT id, ts, station_id, metric, type, severity, reason, payload_json "
-         "FROM alerts WHERE 1=1")
+def get_alerts(metric: str = None, since: str = None, limit: int = 1000):
+    q = """
+    SELECT a.id, a.ts, a.station_id,
+           COALESCE(s.name, a.station_id) AS station_name,
+           a.metric, a.type, a.severity, a.reason, a.payload_json
+    FROM alerts a
+    LEFT JOIN stations s ON a.station_id = s.station_id
+    WHERE 1=1
+    """
     args = []
     if metric:
-        q += " AND metric=?"; args.append(metric)
+        q += " AND a.metric=?"; args.append(metric)
     if since:
-        q += " AND ts>=?"; args.append(since)
-    q += " ORDER BY ts DESC LIMIT 1000"
+        q += " AND a.ts>=?"; args.append(since)
+    q += " ORDER BY a.ts DESC LIMIT ?"; args.append(limit)
     with conn() as c:
         return c.execute(q, tuple(args)).fetchall()
 
