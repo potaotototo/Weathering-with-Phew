@@ -1,0 +1,10 @@
+fastapi==0.114.2
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.2
+requests==2.32.3
+python-dateutil==2.9.0.post0
+streamlit==1.38.0
+loguru==0.7.2
