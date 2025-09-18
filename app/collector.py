@@ -120,6 +120,43 @@ def backfill_day(metric: str, date: str):
             break
     return total
 
+def backfill_range(metric: str, start_date: str, end_date: str) -> int:
+    """
+    Backfill inclusive date range [start_date, end_date], format 'YYYY-MM-DD' (SGT).
+    Returns total rows ingested across the range.
+    """
+    d0 = date.fromisoformat(start_date)
+    d1 = date.fromisoformat(end_date)
+    if d1 < d0:
+        d0, d1 = d1, d0
+    total = 0
+    cur = d0
+    while cur <= d1:
+        total += backfill_day(metric, cur.isoformat())
+        cur += timedelta(days=1)
+    return total
+
+def backfill_week(metric: str, end_date: str | None = None, days: int = 7) -> int:
+    """
+    Backfill the last `days` days ending at `end_date` (inclusive).
+    - end_date: 'YYYY-MM-DD' in SGT; if None, uses 'today' in SGT.
+    - days: number of days to backfill (default 7).
+    """
+    if end_date:
+        end_d = date.fromisoformat(end_date)
+    else:
+        if ZoneInfo:
+            end_d = datetime.now(ZoneInfo("Asia/Singapore")).date()
+        else:
+            # fallback: local 'today'
+            end_d = datetime.now().date()
+
+    total = 0
+    for i in range(days):
+        d = end_d - timedelta(days=i)
+        total += backfill_day(metric, d.isoformat())
+    return total
+
 def normalize_ts(ts: str) -> str:
     """
     Normalize NEA timestamps to SQLite-friendly UTC 'YYYY-MM-DD HH:MM:SS'.

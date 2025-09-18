@@ -24,6 +24,11 @@ class Settings(BaseModel):
     cooldown_minutes: int = 10
     database_path: str = "./weatherguard.db"
     cache_dir: str = "./data"
+    # backfill_on_start: bool = True
+    # backfill_days_on_start: int = 7
+    # backfill_metrics_on_start: List[str] = Field(
+    #     default_factory=lambda: ["temperature", "rainfall"]
+    # )
 
     # Neighbor / rule tuning
     weather_neighbor_min: int = 2          # require ≥2 anomalous neighbors for WEATHER

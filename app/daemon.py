@@ -50,7 +50,7 @@ def run_daemon():
             time.sleep(settings.poll_interval_seconds)
 
         except Exception as e:
-            logger.exception("Daemon iteration failed")
+            logger.error("Daemon iteration failed: {}", e)
             time.sleep(min(60, backoff))
             backoff = min(60, backoff * 2)
 

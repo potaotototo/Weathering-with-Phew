@@ -1,12 +1,27 @@
 import json
+import numpy as np
 import pandas as pd
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from .config import settings
 from .store import insert_alert, conn
 from .features import angular_difference_deg
 
-# Helpers
+# Cache for baseline
+_TEMP_BASELINE_DF: pd.DataFrame | None = None
+_TEMP_BASELINE_BUILT_AT: datetime | None = None
+
+# Tuning
+_TEMP_LOOKBACK_DAYS = 21          # use last ~3 weeks for baseline
+_TEMP_MIN_DAYS = 7                # require >=7 distinct days per (station, minute-of-day)
+_TEMP_SIGMA_FLOOR = 0.4           # °C floor for robust sigma
+_TEMP_REBUILD_EVERY_MIN = 180     # rebuild every 3h
+
+# Alert thresholds (human-intuitive)
+_TEMP_HIGH_RESID = 2.5            # °C hotter than usual
+_TEMP_LOW_RESID  = 3.0            # °C colder than usual
+_TEMP_SUSTAINED_TICKS = 2         # require N consecutive ticks
+
 def _last_alert_time(station_id: str, metric: str, type_: str):
     with conn() as c:
         row = c.execute(
@@ -26,7 +41,6 @@ def _cooldown_minutes_default() -> int:
     return getattr(settings, "cooldown_minutes", 10)
 
 # Simple per-tick delta (fallback for any metric)
-
 def apply_simple_delta_rules(window_df: pd.DataFrame, metric: str, ts: pd.Timestamp):
     """
     Raise an ALERT when change exceeds a per-metric threshold.
@@ -195,43 +209,149 @@ def apply_wind_speed_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
                 payload_json=json.dumps({"last_kn": float(v.iloc[-1])})
             )
 
-# Temperature vs time-of-day rules (HIGH/LOW_UNUSUAL)
-def apply_temp_tod_rules(df_with_tod: pd.DataFrame, ts: pd.Timestamp,
-                         z_hi: float = 3.0, z_lo: float = -3.0,
-                         need: int = 2, delta_min: float = 0.2):
+def _build_temp_baseline() -> pd.DataFrame | None:
     """
-    df_with_tod must include: ts, station_id, metric='temperature', value, resid, z_tod.
-    Emits TEMP_HIGH_UNUSUAL / TEMP_LOW_UNUSUAL when z_tod beyond thresholds,
-    sustained for N ticks, with small absolute movement guard.
+    Build per-station, per-minute-of-day (SGT) baseline:
+      mu = median(value), sigma = 1.4826 * MAD(value)
+    Enforces sigma floor and minimum day coverage.
     """
-    cd_min = _cooldown_minutes_default()
+    cutoff_sql = f"datetime('now','-{_TEMP_LOOKBACK_DAYS} days')"
 
-    g_all = df_with_tod[df_with_tod["metric"] == "temperature"].copy()
-    if g_all.empty or "z_tod" not in g_all.columns:
+    with conn() as c:
+        df = pd.read_sql_query(
+            f"""
+            SELECT ts, station_id, value
+            FROM readings
+            WHERE metric='temperature' AND ts >= {cutoff_sql}
+            """,
+            c,
+        )
+
+    if df.empty:
+        return None
+
+    ts_utc = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    ts_sgt = ts_utc.dt.tz_convert("Asia/Singapore")
+    df["mod"] = ts_sgt.dt.hour * 60 + ts_sgt.dt.minute              # minute-of-day (SGT)
+    df["date_sgt"] = ts_sgt.dt.date
+
+    def _agg(g: pd.DataFrame):
+        vals = g["value"].astype(float).dropna()
+        if vals.empty:
+            return pd.Series({"mu": np.nan, "sigma": np.nan, "days": 0})
+        mu = float(np.median(vals))
+        mad = float(np.median(np.abs(vals - mu)))
+        sigma = 1.4826 * mad
+        days = int(g["date_sgt"].nunique())
+        return pd.Series({"mu": mu, "sigma": sigma, "days": days})
+
+    base = (
+    df.groupby(["station_id", "mod"])
+      .apply(_agg)
+      .reset_index()
+    )
+
+    # floor sigma & filter on minimum day coverage
+    base["sigma"] = base["sigma"].clip(lower=_TEMP_SIGMA_FLOOR)
+    base.loc[base["days"] < _TEMP_MIN_DAYS, ["mu", "sigma"]] = np.nan
+
+    return base[["station_id", "mod", "mu", "sigma", "days"]].reset_index(drop=True)
+
+def ensure_temp_baseline(force: bool = False) -> bool:
+    """Rebuild if missing or stale; returns True if available."""
+    global _TEMP_BASELINE_DF, _TEMP_BASELINE_BUILT_AT
+    now = datetime.now(timezone.utc)
+    if (not force) and _TEMP_BASELINE_DF is not None and _TEMP_BASELINE_BUILT_AT is not None:
+        age_min = (now - _TEMP_BASELINE_BUILT_AT).total_seconds() / 60.0
+        if age_min < _TEMP_REBUILD_EVERY_MIN:
+            return True
+
+    base = _build_temp_baseline()
+    if base is None or base.empty:
+        _TEMP_BASELINE_DF = None
+        _TEMP_BASELINE_BUILT_AT = None
+        return False
+
+    _TEMP_BASELINE_DF = base
+    _TEMP_BASELINE_BUILT_AT = now
+    return True
+
+def apply_temperature_baseline_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
+    """
+    Fire TEMP_HIGH_UNUSUAL / TEMP_LOW_UNUSUAL when residual vs ToD baseline
+    is sustained for N ticks. Severity is |resid| in °C. z_tod in payload.
+
+    window_df must have columns: ts, station_id, metric, value (only temperature rows will be used).
+    """
+    if window_df is None or window_df.empty:
+        return
+    if not ensure_temp_baseline():
         return
 
-    for sid, g in g_all.groupby("station_id"):
-        g = g.sort_values("ts").tail(max(need + 1, 6))
-        if g.empty or len(g) < need + 1:
+    df = window_df.copy()
+    df = df[df["metric"] == "temperature"]
+    if df.empty:
+        return
+
+    # compute minute-of-day (SGT) for join
+    ts_utc = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    ts_sgt = ts_utc.dt.tz_convert("Asia/Singapore")
+    df["mod"] = ts_sgt.dt.hour * 60 + ts_sgt.dt.minute
+
+    base = _TEMP_BASELINE_DF  # cached df
+    merged = df.merge(base, on=["station_id", "mod"], how="left")
+
+    # residual & z_tod
+    merged["resid"] = merged["value"] - merged["mu"]
+    merged["z_tod"] = merged["resid"] / merged["sigma"]
+
+    need = _TEMP_SUSTAINED_TICKS
+
+    for sid, g in merged.groupby("station_id"):
+        g = g.sort_values("ts")
+        # need enough and baseline present
+        if len(g) < need or g["resid"].tail(need).isna().any():
             continue
-        g["delta"] = g["value"].diff()
 
-        # High
-        cond_hi = (g["z_tod"] >= z_hi) & (g["delta"].abs() >= delta_min)
-        if cond_hi.tail(need).all() and _cooldown_ok(sid, "temperature", "TEMP_HIGH_UNUSUAL", ts, cd_min):
+        last_resids = g["resid"].tail(need).to_numpy()
+
+        # HIGH
+        if np.all(last_resids >= _TEMP_HIGH_RESID):
+            last = g.tail(1).iloc[0]
+            payload = {
+                "mu_tod": float(last["mu"]) if pd.notna(last["mu"]) else None,
+                "sigma_tod": float(last["sigma"]) if pd.notna(last["sigma"]) else None,
+                "resid": float(last["resid"]) if pd.notna(last["resid"]) else None,
+                "z_tod": float(last["z_tod"]) if pd.notna(last["z_tod"]) else None,
+                "sustained_ticks": int(need),
+            }
             insert_alert(
-                ts.isoformat(), sid, "temperature", "TEMP_HIGH_UNUSUAL",
-                severity=float(g["z_tod"].iloc[-1]),
-                reason=f"hotter than usual: z_tod={g['z_tod'].iloc[-1]:.2f}, resid={g['resid'].iloc[-1]:.2f}°C",
-                payload_json=json.dumps({"z_tod": float(g["z_tod"].iloc[-1]), "resid": float(g["resid"].iloc[-1])})
+                ts.isoformat(),
+                sid,
+                "temperature",
+                "TEMP_HIGH_UNUSUAL",
+                severity=abs(float(last["resid"])),
+                reason=f"hotter than usual: z_tod={payload['z_tod']:.2f}, resid={payload['resid']:.2f}°C",
+                payload_json=json.dumps(payload),
             )
+            continue
 
-        # Low
-        cond_lo = (g["z_tod"] <= z_lo) & (g["delta"].abs() >= delta_min)
-        if cond_lo.tail(need).all() and _cooldown_ok(sid, "temperature", "TEMP_LOW_UNUSUAL", ts, cd_min):
+        # LOW
+        if np.all(last_resids <= -_TEMP_LOW_RESID):
+            last = g.tail(1).iloc[0]
+            payload = {
+                "mu_tod": float(last["mu"]) if pd.notna(last["mu"]) else None,
+                "sigma_tod": float(last["sigma"]) if pd.notna(last["sigma"]) else None,
+                "resid": float(last["resid"]) if pd.notna(last["resid"]) else None,
+                "z_tod": float(last["z_tod"]) if pd.notna(last["z_tod"]) else None,
+                "sustained_ticks": int(need),
+            }
             insert_alert(
-                ts.isoformat(), sid, "temperature", "TEMP_LOW_UNUSUAL",
-                severity=float(abs(g["z_tod"].iloc[-1])),
-                reason=f"colder than usual: z_tod={g['z_tod'].iloc[-1]:.2f}, resid={g['resid'].iloc[-1]:.2f}°C",
-                payload_json=json.dumps({"z_tod": float(g["z_tod"].iloc[-1]), "resid": float(g["resid"].iloc[-1])})
+                ts.isoformat(),
+                sid,
+                "temperature",
+                "TEMP_LOW_UNUSUAL",
+                severity=abs(float(last["resid"])),
+                reason=f"colder than usual: z_tod={payload['z_tod']:.2f}, resid={payload['resid']:.2f}°C",
+                payload_json=json.dumps(payload),
             )

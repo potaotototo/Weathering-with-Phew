@@ -1,62 +1,107 @@
 import os
 import json
+import math
 import requests
 import pandas as pd
 import streamlit as st
+
+from requests.exceptions import ReadTimeout
 
 API = os.getenv("API_BASE", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="Weathering with Phew", layout="wide")
 st.title("🌦️ Weathering with Phew")
 
-# ------------ helpers ------------
+# Helpers
 @st.cache_data(ttl=10)
 def api_get(path: str, **params):
-    r = requests.get(f"{API}{path}", params=params, timeout=10)
+    r = requests.get(f"{API}{path}", params=params, timeout=20)
     r.raise_for_status()
     return r.json()
 
-@st.cache_data(ttl=60)
-def load_stations():
-    try:
-        sts = api_get("/stations/active", minutes=180)
-        if not sts:
-            sts = api_get("/stations")
-    except Exception:
-        sts = []
-    df = pd.DataFrame(sts)
-    # id->name mapping for UI fallbacks
-    id2name = {}
-    if not df.empty and "station_id" in df and "name" in df:
-        id2name = dict(zip(df["station_id"], df["name"]))
-    return df, id2name
+@st.cache_data(ttl=10)
+def load_stations_server(minutes: int, metric: str | None):
+    """Always try server-side active endpoint first."""
+    params = {"minutes": minutes}
+    if metric:
+        params["metric"] = metric
+    data = api_get("/stations/active", **params)  # raises on HTTP != 200
+    df = pd.DataFrame(data)
+    return df
 
-# ------------ Stations / selector ------------
+@st.cache_data(ttl=60)
+def load_stations_all():
+    return pd.DataFrame(api_get("/stations"))
+
+def id_to_name_map(df):
+    return dict(zip(df.get("station_id", []), df.get("name", [])))
+
+# UI main body
+st.divider()
 col1, col2 = st.columns([2, 3])
 with col1:
-    st.subheader("Stations")
-    df_s, id2name = load_stations()
+    st.subheader("Select Available Stations")
 
-    if not df_s.empty and {"lat", "lon"}.issubset(df_s.columns):
-        st.map(df_s.rename(columns={"lat": "latitude", "lon": "longitude"}))
+    active_only = st.checkbox("Show active stations only", value=True)
+    active_minutes = st.slider(
+        "Active window (minutes)", 30, 360, 180, step=15, disabled=not active_only
+    )
 
+    # Scope for "active" (any metric vs selected metric)
+    # This radio lives in the left column so the list updates when you change it.
+    active_scope = st.radio(
+        "Active scope",
+        ["Any metric", "Selected metric"],
+        index=0,
+        horizontal=True,
+        disabled=not active_only,
+        help="Use 'Selected metric' to only show stations active for the chosen metric."
+    )
+
+with col2:
+    st.subheader("View Readings")
     metric = st.selectbox(
         "Metric",
         ["temperature", "rainfall", "humidity", "wind_direction", "wind_speed"],
         index=0,
     )
+    n = st.slider("Points", 60, 720, 300, step=30)
 
-    # stable list for selectbox; format_func shows human name
+# Load stations (prefer server)
+try:
+    if active_only:
+        metric_for_active = None if active_scope == "Any metric" else metric
+        df_s = load_stations_server(active_minutes, metric_for_active)
+        source_label = "active via server"
+    else:
+        df_s = load_stations_all()
+        source_label = "all stations"
+except ReadTimeout:
+    # Fast fallback if active endpoint is temporarily slow (e.g., backfill running)
+    df_s = load_stations_all()
+    source_label = "all stations (active endpoint timed out)"
+    st.warning("Active-stations endpoint timed out — showing all stations for now.")
+except Exception:
+    df_s = load_stations_all()
+    source_label = "all stations (active endpoint unavailable)"
+
+id2name = id_to_name_map(df_s)
+
+with col1:
+    # Map
+    if not df_s.empty and {"lat", "lon"}.issubset(df_s.columns):
+        st.map(df_s.rename(columns={"lat": "latitude", "lon": "longitude"}))
+    st.caption(f"Stations: showing {len(df_s)} ({source_label})")
+
+with col2:
+    # Station picker
     station_ids = df_s["station_id"].tolist() if not df_s.empty else [""]
     station_id = st.selectbox(
         "Station",
         station_ids,
-        format_func=lambda sid: id2name.get(sid, sid),
+        format_func=lambda sid: id2name.get(sid, sid)
     )
 
-    n = st.slider("Points", 60, 720, 300, step=30)
-
-with col2:
     st.subheader("Latest readings")
     if station_id:
         try:
@@ -72,8 +117,9 @@ with col2:
 
 st.divider()
 
-# ------------ Alerts ------------
+# Alerts with location filters
 st.subheader("Alerts")
+
 metric_filter = st.selectbox(
     "Filter metric",
     ["", "temperature", "rainfall", "humidity", "wind_direction", "wind_speed"],
@@ -81,19 +127,83 @@ metric_filter = st.selectbox(
 )
 since = st.text_input("Since (ISO, optional)", "")
 
+with st.expander("Location filter", expanded=False):
+    mode = st.radio("Mode", ["None", "Near a station", "Bounding box"], horizontal=True)
+
+    bbox = None
+    center_sid, radius_km = None, None
+
+    if mode == "Bounding box":
+        st.caption("Show alerts where station coordinates fall within the rectangle.")
+        c1, c2 = st.columns(2)
+        with c1:
+            min_lat = st.number_input("Min latitude", value=1.200000, step=0.001, format="%.6f")
+            min_lon = st.number_input("Min longitude", value=103.600000, step=0.001, format="%.6f")
+        with c2:
+            max_lat = st.number_input("Max latitude", value=1.485000, step=0.001, format="%.6f")
+            max_lon = st.number_input("Max longitude", value=104.100000, step=0.001, format="%.6f")
+        bbox = (min_lat, max_lat, min_lon, max_lon)
+
+    if mode == "Near a station":
+        st.caption("Show alerts within a radius of a station.")
+        center_sid = st.selectbox(
+            "Center station",
+            df_s["station_id"].tolist() if not df_s.empty else [""],
+            format_func=lambda sid: id2name.get(sid, sid),
+        )
+        radius_km = st.slider("Radius (km)", 1, 25, 5, step=1)
+
+# Pull alerts from API, filter by metric/since server-side
 try:
     alerts = api_get("/alerts", metric=(metric_filter or None), since=(since or None))
 except Exception:
     alerts = []
 
-df_a = pd.DataFrame(alerts)
-if not df_a.empty:
-    # prefer API-provided station_name; fall back to mapping if missing
-    if "station_name" not in df_a.columns:
-        df_a["station_name"] = df_a.get("station_id", pd.Series([])).map(id2name)
+df_alerts = pd.DataFrame(alerts)
 
-    # parse payload JSON if it came as a string
-    if "payload" in df_a.columns:
+if df_alerts.empty:
+    st.caption("No alerts yet.")
+else:
+    # Ensure station_name; join lat/lon for location filtering
+    if "station_name" not in df_alerts.columns:
+        df_alerts["station_name"] = df_alerts.get("station_id").map(id2name)
+    if not df_s.empty and {"station_id", "lat", "lon"}.issubset(df_s.columns):
+        df_alerts = df_alerts.merge(df_s[["station_id", "lat", "lon"]], on="station_id", how="left")
+
+    # Apply location filters (client-side)
+    df_filtered = df_alerts.copy()
+
+    if mode == "Bounding box" and bbox and {"lat", "lon"}.issubset(df_filtered.columns):
+        min_lat, max_lat, min_lon, max_lon = bbox
+        df_filtered = df_filtered[
+            df_filtered["lat"].between(min_lat, max_lat) &
+            df_filtered["lon"].between(min_lon, max_lon)
+        ]
+
+    if mode == "Near a station" and center_sid and radius_km and not df_s.empty:
+        row = df_s[df_s["station_id"] == center_sid]
+        if not row.empty and {"lat", "lon"}.issubset(row.columns):
+            c_lat, c_lon = float(row.iloc[0]["lat"]), float(row.iloc[0]["lon"])
+
+            def _haversine_km(lat1, lon1, lat2, lon2):
+                R = 6371.0
+                import math
+                p1, p2 = math.radians(lat1), math.radians(lat2)
+                dphi = math.radians(lat2 - lat1)
+                dlmb = math.radians(lon2 - lon1)
+                a = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlmb/2)**2
+                return 2*R*math.asin(math.sqrt(a))
+
+            def _dist_ok(r):
+                try:
+                    return _haversine_km(c_lat, c_lon, float(r["lat"]), float(r["lon"])) <= radius_km
+                except Exception:
+                    return False
+
+            df_filtered = df_filtered[df_filtered.apply(_dist_ok, axis=1)]
+
+    # Parse payload JSON for nicer rendering
+    if "payload" in df_filtered.columns:
         def _parse_payload(p):
             if isinstance(p, dict):
                 return p
@@ -101,11 +211,12 @@ if not df_a.empty:
                 return json.loads(p) if isinstance(p, str) else p
             except Exception:
                 return p
-        df_a["payload"] = df_a["payload"].apply(_parse_payload)
+        df_filtered["payload"] = df_filtered["payload"].apply(_parse_payload)
 
-    # tidy columns for display
-    show_cols = [c for c in ["id", "ts", "station_name", "metric", "type", "severity", "reason", "payload"] if c in df_a.columns]
-    df_a = df_a[show_cols].rename(columns={"station_name": "station"})
-    st.dataframe(df_a.sort_values("ts", ascending=False), use_container_width=True, height=360)
-else:
-    st.caption("No alerts yet.")
+    # Display
+    show_cols = [c for c in [
+        "id", "ts", "station_name", "metric", "type", "severity", "reason", "lat", "lon", "payload"
+    ] if c in df_filtered.columns]
+    df_disp = df_filtered[show_cols].rename(columns={"station_name": "station"})
+    st.caption(f"Showing {len(df_disp)} of {len(df_alerts)} alert(s)")
+    st.dataframe(df_disp.sort_values("ts", ascending=False), use_container_width=True, height=380)
