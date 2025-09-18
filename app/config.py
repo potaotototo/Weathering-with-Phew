@@ -67,6 +67,7 @@ class Settings(BaseModel):
     rain_intense_total_mm: float = 2.0
     rain_calm_mm: float = 0.05
     rain_stop_quiet_intervals: int = 2
+    rain_stop_prev_window: int = 6
     rain_trend_window: int = 3
     rain_drop_pct_for_easing: float = 0.5
     rain_cooldown_minutes: int = 20

@@ -167,7 +167,7 @@ def get_active_stations(minutes: int = 180, metric: str | None = None):
     with conn() as c:
         return c.execute(q, tuple(args)).fetchall()
 
-# ---------- maintenance / cleanup ----------
+# Wipe out
 
 def clear_alerts():
     with conn() as c:
@@ -184,3 +184,26 @@ def clear_readings():
 def vacuum():
     with conn() as c:
         c.execute("VACUUM")
+
+# Delete
+def delete_alerts(metric: str | None = None,
+                  since: str | None = None,
+                  station_id: str | None = None,
+                  type_: str | None = None) -> int:
+    """
+    Delete alerts matching the optional filters.
+    Returns the number of rows deleted.
+    """
+    q = "DELETE FROM alerts WHERE 1=1"
+    args = []
+    if metric:
+        q += " AND metric=?";      args.append(metric)
+    if since:
+        q += " AND ts>=?";         args.append(since)
+    if station_id:
+        q += " AND station_id=?";  args.append(station_id)
+    if type_:
+        q += " AND type=?";        args.append(type_)
+    with conn() as c:
+        cur = c.execute(q, tuple(args))
+        return cur.rowcount or 0

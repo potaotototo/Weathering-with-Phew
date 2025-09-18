@@ -19,6 +19,11 @@ def api_get(path: str, **params):
     r.raise_for_status()
     return r.json()
 
+def api_delete(path: str, **params):
+    r = requests.delete(f"{API}{path}", params=params, timeout=30) 
+    r.raise_for_status()
+    return r.json()
+
 @st.cache_data(ttl=10)
 def load_stations_server(minutes: int, metric: str | None):
     """Always try server-side active endpoint first."""
@@ -110,7 +115,8 @@ with col2:
             data = []
         df = pd.DataFrame(data)
         if not df.empty:
-            df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+            df["ts"] = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
+              .dt.tz_convert("Asia/Singapore"))
             st.line_chart(df.set_index("ts")["value"], height=300)
         else:
             st.caption("No data yet — run daemon/collector.")
@@ -164,6 +170,9 @@ df_alerts = pd.DataFrame(alerts)
 if df_alerts.empty:
     st.caption("No alerts yet.")
 else:
+    # Display SG timezone
+    df_alerts["ts"] = (pd.to_datetime(df_alerts["ts"], utc=True, errors="coerce")
+                         .dt.tz_convert("Asia/Singapore"))
     # Ensure station_name; join lat/lon for location filtering
     if "station_name" not in df_alerts.columns:
         df_alerts["station_name"] = df_alerts.get("station_id").map(id2name)
@@ -220,3 +229,50 @@ else:
     df_disp = df_filtered[show_cols].rename(columns={"station_name": "station"})
     st.caption(f"Showing {len(df_disp)} of {len(df_alerts)} alert(s)")
     st.dataframe(df_disp.sort_values("ts", ascending=False), use_container_width=True, height=380)
+
+st.divider()
+with st.expander("🧹 Admin: Clear alerts", expanded=False):
+    # pull stations for nicer dropdown (if not already loaded earlier)
+    try:
+        stations_admin = api_get("/stations/active", minutes=180)
+        if not stations_admin:
+            stations_admin = api_get("/stations")
+    except Exception:
+        stations_admin = []
+    df_admin_s = pd.DataFrame(stations_admin)
+    id2name_admin = dict(zip(df_admin_s.get("station_id", []), df_admin_s.get("name", [])))
+
+    c1, c2, c3, c4 = st.columns([1,1,1,1])
+
+    with c1:
+        metric_del = st.selectbox(
+            "Metric (optional)",
+            ["", "temperature", "rainfall", "humidity", "wind_direction", "wind_speed"],
+            index=0,
+            key="del_metric",
+        )
+    with c2:
+        station_del = st.selectbox(
+            "Station (optional)",
+            [""] + (df_admin_s["station_id"].tolist() if not df_admin_s.empty else []),
+            format_func=lambda sid: id2name_admin.get(sid, sid),
+            key="del_station",
+        )
+    with c3:
+        since_del = st.text_input("Since (ISO, optional)", "", key="del_since")
+    with c4:
+        type_del = st.text_input("Type (optional)", "", key="del_type")
+
+    if st.button("Delete matching alerts", type="primary"):
+        try:
+            resp = api_delete(
+                "/alerts",
+                metric=(metric_del or None),
+                since=(since_del or None),
+                station_id=(station_del or None),
+                type=(type_del or None),
+            )
+            st.success(f"Deleted {resp.get('deleted', 0)} alert(s).")
+            st.cache_data.clear()  # refreshes alerts table next rerun
+        except Exception as e:
+            st.error(f"Delete failed: {e}")

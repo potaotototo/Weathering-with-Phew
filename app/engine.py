@@ -134,15 +134,12 @@ class Engine:
                 apply_temperature_baseline_rules(window_df, t_cur)
 
             elif metric == "rainfall":
-                # Event rules; we can also keep the simple delta alert for obvious spikes
                 if callable(apply_rain_event_rules):
                     apply_rain_event_rules(window_df, t_cur)
-                apply_simple_delta_rules(window_df, metric, t_cur)
 
             elif metric == "wind_speed":
                 if callable(apply_wind_speed_rules):
                     apply_wind_speed_rules(window_df, t_cur)
-                # (no extra simple-delta to avoid duplicates unless you want it)
 
             else:
                 # humidity, wind_direction -> simple unsupervised change rule

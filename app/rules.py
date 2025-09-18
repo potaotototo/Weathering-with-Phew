@@ -22,6 +22,9 @@ _TEMP_HIGH_RESID = 2.5            # °C hotter than usual
 _TEMP_LOW_RESID  = 3.0            # °C colder than usual
 _TEMP_SUSTAINED_TICKS = 2         # require N consecutive ticks
 
+# cool-down for simple delta alerts (minutes)
+_SIMPLE_DELTA_COOLDOWN_MIN = getattr(settings, "simple_delta_cooldown_minutes", 3)
+
 def _last_alert_time(station_id: str, metric: str, type_: str):
     with conn() as c:
         row = c.execute(
@@ -42,23 +45,27 @@ def _cooldown_minutes_default() -> int:
 
 # Simple per-tick delta (fallback for any metric)
 def apply_simple_delta_rules(window_df: pd.DataFrame, metric: str, ts: pd.Timestamp):
-    """
-    Raise an ALERT when change exceeds a per-metric threshold.
-    - rainfall: current 5-min value (mm) >= threshold, sustained N ticks
-    - others: |Δ| >= threshold (circular for wind_direction), sustained N ticks
-    Emits: type='ALERT'
-    """
-    thr = settings.simple_delta_threshold.get(metric, float("inf"))
+    thr  = settings.simple_delta_threshold.get(metric, float("inf"))
     need = int(settings.simple_sustained_ticks.get(metric, 1))
+    cd_min = _SIMPLE_DELTA_COOLDOWN_MIN
 
     for sid, g in window_df[window_df["metric"] == metric].groupby("station_id"):
         g = g.sort_values("ts")
+
         if metric == "rainfall":
             vals = g["value"].tail(need)
             if len(vals) < need or vals.isna().any():
                 continue
-            if not (vals >= thr).all():
+            ok_now = (vals >= thr).all()
+            # rising-edge: previously not all ticks >= thr
+            prev_vals = g["value"].iloc[-(need+1):-1] if len(g) >= need+1 else pd.Series([], dtype=float)
+            ok_prev = (len(prev_vals) == need) and (prev_vals >= thr).all()
+            if not ok_now or ok_prev:
                 continue
+            # cooldown to suppress re-fires while latest ts is unchanged
+            if not _cooldown_ok(sid, metric, "ALERT", ts, cd_min):
+                continue
+
             curr = float(vals.iloc[-1])
             payload = {"value": curr, "threshold": thr, "sustained_ticks": need}
             insert_alert(
@@ -70,11 +77,13 @@ def apply_simple_delta_rules(window_df: pd.DataFrame, metric: str, ts: pd.Timest
         else:
             if len(g) < need + 1:
                 continue
+
+            # per-tick deltas
             if metric == "wind_direction":
-                curr_vals = g["value"].tail(need + 1).to_list()
+                vals = g["value"].tail(need + 1).to_list()
                 deltas = [
-                    abs(angular_difference_deg(curr_vals[i+1], curr_vals[i]))
-                    for i in range(len(curr_vals) - 1)
+                    abs(angular_difference_deg(vals[i+1], vals[i]))
+                    for i in range(len(vals) - 1)
                 ]
             else:
                 vals = g["value"].tail(need + 1)
@@ -82,7 +91,16 @@ def apply_simple_delta_rules(window_df: pd.DataFrame, metric: str, ts: pd.Timest
                     continue
                 deltas = (vals.diff().abs().dropna()).to_list()
 
-            if len(deltas) < need or not all(d >= thr for d in deltas[-need:]):
+            if len(deltas) < need:
+                continue
+
+            ok_now  = all(d >= thr for d in deltas[-need:])
+            ok_prev = (len(deltas) >= need + 1) and all(d >= thr for d in deltas[-(need+1):-1])
+            if not ok_now or ok_prev:
+                continue
+
+            # cooldown to avoid duplicates while same 5-min ts is being processed by multiple loops
+            if not _cooldown_ok(sid, metric, "ALERT", ts, cd_min):
                 continue
 
             curr = float(g["value"].iloc[-1])
@@ -105,32 +123,40 @@ def apply_simple_delta_rules(window_df: pd.DataFrame, metric: str, ts: pd.Timest
 # Rain event rules (ONSET / INTENSE / EASING / STOP)
 def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
     """
-    window_df: rows for metric='rainfall' across stations over at least ~30–45 min.
-    Uses both tick thresholds and 15-min sum (W = rain_trend_window).
-    Emits: RAIN_ONSET, RAIN_INTENSE, RAIN_EASING, RAIN_STOP
+    Emits: RAIN_ONSET, RAIN_INTENSE, RAIN_EASING, RAIN_STOP.
+    Key change: RAIN_STOP requires evidence of rain in the immediately
+    preceding window (prev_k), not just zeros now.
     """
-    W = getattr(settings, "rain_trend_window", 3)  # 3 ticks ≈ 15 min
+    W = getattr(settings, "rain_trend_window", 3)                # 3 ticks ≈ 15 min
     onset_k = getattr(settings, "rain_onset_min_intervals", 2)
     calm_mm = getattr(settings, "rain_calm_mm", 0.05)
-    cd_min = getattr(settings, "rain_cooldown_minutes", _cooldown_minutes_default())
+    cd_min  = getattr(settings, "rain_cooldown_minutes", 20)
 
-    thr_onset_tick = getattr(settings, "rain_onset_tick_mm", 0.2)
-    thr_onset_S15  = getattr(settings, "rain_onset_S15_mm", 0.5)
+    thr_onset_tick   = getattr(settings, "rain_onset_tick_mm", 0.2)
+    thr_onset_S15    = getattr(settings, "rain_onset_S15_mm", 0.5)
     thr_intense_tick = getattr(settings, "rain_intense_tick_mm", 2.0)
     thr_intense_S15  = getattr(settings, "rain_intense_S15_mm", 3.0)
 
-    for sid, g in window_df[window_df["metric"]=="rainfall"].groupby("station_id"):
+    q = getattr(settings, "rain_stop_quiet_intervals", 2) # STOP quiet tail
+    prev_k = getattr(settings, "rain_stop_prev_window", 6) # need prior wet within this many ticks (≈30m)
+
+    df = window_df[window_df["metric"] == "rainfall"].copy()
+    if df.empty:
+        return
+
+    for sid, g in df.groupby("station_id"):
         g = g.sort_values("ts").copy()
-        if len(g) < max(W, onset_k) + 2:
+        if len(g) < max(W, onset_k, q + prev_k) + 2:
             continue
 
-        recent_vals = g["value"].tail(W).fillna(0)
-        prev_vals   = g["value"].iloc[-2-W:-2].fillna(0) if len(g) >= W + 2 else pd.Series([], dtype=float)
+        # rolling context
+        recent_vals = g["value"].tail(W).fillna(0) # last ~15m
+        prev_vals   = g["value"].iloc[-2-W:-2].fillna(0) if len(g) >= W+2 else pd.Series([], dtype=float)
 
         recent_sum = float(recent_vals.sum())
         prev_sum   = float(prev_vals.sum()) if not prev_vals.empty else 0.0
 
-        # ONSET: (any of last onset_k ticks >= thr_onset_tick OR recent_sum >= thr_onset_S15) AND previously dry
+        # RAIN_ONSET
         onset_tick_ok = (recent_vals.tail(onset_k) >= thr_onset_tick).any()
         onset_sum_ok  = (recent_sum >= thr_onset_S15)
         was_dry = prev_sum <= calm_mm
@@ -142,7 +168,7 @@ def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
                 payload_json=json.dumps({"S15_mm": recent_sum, "prev15m_mm": prev_sum})
             )
 
-        # INTENSE: current tick or S15 over heavy thresholds
+        # RAIN_INTENSE 
         tick_now = float(g["value"].iloc[-1]) if pd.notna(g["value"].iloc[-1]) else 0.0
         if (tick_now >= thr_intense_tick or recent_sum >= thr_intense_S15) and _cooldown_ok(sid, "rainfall", "RAIN_INTENSE", ts, cd_min):
             insert_alert(
@@ -152,7 +178,7 @@ def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
                 payload_json=json.dumps({"tick_mm": tick_now, "S15_mm": recent_sum})
             )
 
-        # EASING: recent S15 ≤ 50% of previous S15 (configurable)
+        # RAIN_EASING 
         drop_frac = getattr(settings, "rain_drop_pct_for_easing", 0.5)
         easing = (prev_sum > calm_mm) and (recent_sum <= prev_sum * (1.0 - drop_frac))
         if easing and _cooldown_ok(sid, "rainfall", "RAIN_EASING", ts, cd_min):
@@ -164,10 +190,25 @@ def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
                 payload_json=json.dumps({"S15_mm": recent_sum, "prev15m_mm": prev_sum, "drop_pct": drop_pct})
             )
 
-        # STOP: last q ticks effectively dry
+        # RAIN_STOP 
+        # last q ticks effectively dry, and there was rain shortly before
         q = getattr(settings, "rain_stop_quiet_intervals", 2)
-        stopped = (g["value"].tail(q) <= calm_mm).all()
-        if stopped and _cooldown_ok(sid, "rainfall", "RAIN_STOP", ts, cd_min):
+        prev_k = getattr(settings, "rain_stop_prev_window", 6) # ~30m lookback at 5m cadence
+        calm_mm = getattr(settings, "rain_calm_mm", 0.05)
+
+        vals = pd.to_numeric(g["value"], errors="coerce").fillna(0.0)
+
+        # Dry in the most recent q ticks
+        stopped_now = (vals.tail(q) <= calm_mm).all()
+
+        # Was there any wet tick in the window just BEFORE the dry streak?
+        if len(vals) >= q + prev_k:
+            prev_span = vals.iloc[-(q + prev_k):-q] # the [q ... q + prev_k] window
+        else:
+            prev_span = vals.iloc[0:0]
+        previously_wet = (prev_span > calm_mm).any()
+
+        if stopped_now and previously_wet and _cooldown_ok(sid, "rainfall", "RAIN_STOP", ts, cd_min):
             insert_alert(
                 ts.isoformat(), sid, "rainfall", "RAIN_STOP",
                 severity=0.0,
@@ -309,9 +350,9 @@ def apply_temperature_baseline_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
 
     for sid, g in merged.groupby("station_id"):
         g = g.sort_values("ts")
-        # need enough and baseline present
         if len(g) < need or g["resid"].tail(need).isna().any():
             continue
+        last_ts = pd.to_datetime(g["ts"].iloc[-1], utc=True, errors="coerce")
 
         last_resids = g["resid"].tail(need).to_numpy()
 

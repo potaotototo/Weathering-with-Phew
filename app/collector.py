@@ -1,4 +1,3 @@
-# app/collector.py
 import requests
 from datetime import datetime, timezone
 from .config import settings

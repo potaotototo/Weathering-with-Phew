@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query
-from .store import conn, init_db, get_alerts, get_latest_readings, all_stations, get_active_stations
+from .store import init_db, get_alerts, get_latest_readings, all_stations, get_active_stations, delete_alerts as _delete_alerts
 from .stations import station_index
 from .log import logger
 
@@ -8,7 +8,7 @@ app = FastAPI(title="Weathering with Phew API")
 # --- ensure DB schema + hydrate station index at startup ---
 @app.on_event("startup")
 def _startup():
-    init_db()                 # creates tables / WAL if not present (idempotent)
+    init_db() 
     try:
         station_index._hydrate()  # builds KDTree once we have station coords
         logger.info("Station index hydrated")
@@ -46,6 +46,16 @@ async def alerts(metric: str | None = None, since: str | None = None):
         }
         for r in rows
     ]
+
+@app.delete("/alerts")
+async def delete_alerts_endpoint(
+    metric: str | None = None,
+    since: str | None = None,
+    station_id: str | None = None,
+    type: str | None = None,   # name is fine; it's a param
+):
+    deleted = _delete_alerts(metric=metric, since=since, station_id=station_id, type_=type)
+    return {"deleted": deleted}
 
 @app.get("/latest")
 async def latest(metric: str, station_id: str | None = None, n: int = 300):
