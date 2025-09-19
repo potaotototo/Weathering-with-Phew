@@ -124,6 +124,7 @@ with col2:
 st.divider()
 
 # Alerts with location filters
+
 st.subheader("Alerts")
 
 metric_filter = st.selectbox(
@@ -171,8 +172,11 @@ if df_alerts.empty:
     st.caption("No alerts yet.")
 else:
     # Display SG timezone
-    df_alerts["ts"] = (pd.to_datetime(df_alerts["ts"], utc=True, errors="coerce")
-                         .dt.tz_convert("Asia/Singapore"))
+    df_alerts["ts"] = (
+        pd.to_datetime(df_alerts["ts"], utc=True, errors="coerce")
+          .dt.tz_convert("Asia/Singapore")
+    )
+
     # Ensure station_name; join lat/lon for location filtering
     if "station_name" not in df_alerts.columns:
         df_alerts["station_name"] = df_alerts.get("station_id").map(id2name)
@@ -211,26 +215,72 @@ else:
 
             df_filtered = df_filtered[df_filtered.apply(_dist_ok, axis=1)]
 
-    # Parse payload JSON for nicer rendering
+    # Show selected payload details
+    def _parse_payload(p):
+        if isinstance(p, dict):
+            return p
+        try:
+            return json.loads(p) if isinstance(p, str) else p
+        except Exception:
+            return p
+
+    def _payload_summary(p: object, max_items: int = 4, max_len: int = 120) -> str:
+        if isinstance(p, dict):
+            parts = []
+            for k in sorted(p.keys()):
+                v = p[k]
+                if isinstance(v, float):
+                    v = round(v, 3)
+                elif isinstance(v, (list, dict)):
+                    v = "[…]"
+                parts.append(f"{k}={v}")
+                if len(parts) >= max_items:
+                    break
+            s = ", ".join(parts)
+        else:
+            s = str(p)
+        return (s[:max_len] + "…") if len(s) > max_len else s
+
+    # Parse payload from either 'payload' or 'payload_json'
     if "payload" in df_filtered.columns:
-        def _parse_payload(p):
-            if isinstance(p, dict):
-                return p
-            try:
-                return json.loads(p) if isinstance(p, str) else p
-            except Exception:
-                return p
         df_filtered["payload"] = df_filtered["payload"].apply(_parse_payload)
+    elif "payload_json" in df_filtered.columns:
+        df_filtered["payload"] = df_filtered["payload_json"].apply(_parse_payload)
+
+    # Add compact summary for table
+    df_filtered["payload_summary"] = df_filtered.get("payload", pd.Series([None]*len(df_filtered))).apply(_payload_summary)
 
     # Display
     show_cols = [c for c in [
-        "id", "ts", "station_name", "metric", "type", "severity", "reason", "lat", "lon", "payload"
+        "id", "ts", "station_name", "metric", "type", "severity", "reason", "lat", "lon", "payload_summary"
     ] if c in df_filtered.columns]
-    df_disp = df_filtered[show_cols].rename(columns={"station_name": "station"})
+    df_disp = df_filtered[show_cols].rename(columns={"station_name": "station", "payload_summary": "payload"})
+
+    st.caption("Times shown in SGT; stored in UTC.")
     st.caption(f"Showing {len(df_disp)} of {len(df_alerts)} alert(s)")
+
     st.dataframe(df_disp.sort_values("ts", ascending=False), use_container_width=True, height=380)
 
+    # Details panel for full JSON payload
+    with st.expander("🔎 Payload details", expanded=False):
+        if "id" in df_filtered.columns and not df_filtered.empty:
+            # Default to most recent alert
+            recent = df_filtered.sort_values("ts", ascending=False).reset_index(drop=True)
+            sel_id = st.selectbox("Select alert", options=recent["id"].tolist(), index=0)
+            row = df_filtered[df_filtered["id"] == sel_id].iloc[0]
+            st.write(f"**{row.get('station_name', row.get('station_id'))}** • "
+                     f"{row.get('metric')} • {row.get('type')} • {row.get('ts')}")
+            st.json(row.get("payload", {}), expanded=True)
+            st.code(json.dumps(row.get("payload", {}), ensure_ascii=False, indent=2), language="json")
+        else:
+            st.caption("No alerts to show.")
+
 st.divider()
+
+# Clear alerts (with filters)
+
+st.subheader("Clear Alerts")
+
 with st.expander("🧹 Admin: Clear alerts", expanded=False):
     # pull stations for nicer dropdown (if not already loaded earlier)
     try:

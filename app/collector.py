@@ -1,9 +1,9 @@
 import requests
+
 from datetime import datetime, timezone
 from .config import settings
 from .store import write_readings, upsert_stations
 from .log import logger
-
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 

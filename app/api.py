@@ -2,6 +2,7 @@ from fastapi import FastAPI, Query
 from .store import init_db, get_alerts, get_latest_readings, all_stations, get_active_stations, delete_alerts as _delete_alerts
 from .stations import station_index
 from .log import logger
+from typing import Optional, List, Dict, Any
 
 app = FastAPI(title="Weathering with Phew API")
 
@@ -36,16 +37,79 @@ async def stations_active(
     ]
 
 @app.get("/alerts")
-async def alerts(metric: str | None = None, since: str | None = None):
-    rows = get_alerts(metric=metric, since=since)
-    return [
-        {
-            "id": r[0], "ts": r[1], "station_id": r[2],
-            "metric": r[3], "type": r[4], "severity": r[5],
-            "reason": r[6], "payload": r[7]
-        }
-        for r in rows
-    ]
+async def alerts(
+    metric: Optional[str] = Query(default=None),
+    since: Optional[str] = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+) -> List[Dict[str, Any]]:
+    try:
+        rows = get_alerts(metric=metric, since=since, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    if not rows:
+        return []
+
+    out: List[Dict[str, Any]] = []
+
+    # Returned dictionary
+    if isinstance(rows[0], dict):
+        for d in rows:
+            d = dict(d)  # copy
+            # Normalize payload
+            if "payload" not in d and "payload_json" in d:
+                pj = d.get("payload_json")
+                try:
+                    d["payload"] = json.loads(pj) if isinstance(pj, str) else pj
+                except Exception:
+                    d["payload"] = pj
+            d.pop("payload_json", None)
+            # Fallback station_name
+            d.setdefault("station_name", d.get("station_id"))
+            # Return only canonical fields (in order)
+            out.append({
+                "id": d.get("id"),
+                "ts": d.get("ts"),
+                "station_id": d.get("station_id"),
+                "station_name": d.get("station_name"),
+                "metric": d.get("metric"),
+                "type": d.get("type"),
+                "severity": d.get("severity"),
+                "reason": d.get("reason"),
+                "payload": d.get("payload"),
+            })
+        return out
+
+    # Returned tuple
+    # id, ts, station_id, station_name, metric, type, severity, reason, payload_json
+    for r in rows:
+        if len(r) == 9:
+            rid, ts, station_id, station_name, metric_, type_, severity, reason, payload_json = r
+        elif len(r) == 8:
+            # No station_name column; use station_id
+            rid, ts, station_id, metric_, type_, severity, reason, payload_json = r
+            station_name = station_id
+        else:
+            # Unexpected shape — skip or raise
+            raise HTTPException(status_code=500, detail=f"Unexpected alerts row len={len(r)}")
+
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+        except Exception:
+            payload = payload_json
+
+        out.append({
+            "id": rid,
+            "ts": ts,
+            "station_id": station_id,
+            "station_name": station_name,
+            "metric": metric_,
+            "type": type_,
+            "severity": severity,
+            "reason": reason,
+            "payload": payload,
+        })
+    return out
 
 @app.delete("/alerts")
 async def delete_alerts_endpoint(
