@@ -63,7 +63,7 @@ def init_db():
         c.executescript(SCHEMA)
     logger.info("SQLite ready at {}", settings.database_path)
 
-# ---------- writes ----------
+# WRITE
 
 def write_readings(rows: Iterable[Tuple]):
     with conn() as c:
@@ -86,7 +86,20 @@ def insert_alert(ts, station_id, metric, type_, severity, reason, payload_json):
             (ts, station_id, metric, type_, severity, reason, payload_json),
         )
 
-# ---------- reads / queries ----------
+def delete_alerts_range(metric: str | None, since_utc: str, until_utc: str, station_id: str | None = None, type_: str | None = None) -> int:
+    q = "DELETE FROM alerts WHERE ts>=? AND ts<?"
+    args = [since_utc, until_utc]
+    if metric:
+        q += " AND metric=?"; args.append(metric)
+    if station_id:
+        q += " AND station_id=?"; args.append(station_id)
+    if type_:
+        q += " AND type=?"; args.append(type_)
+    with conn() as c:
+        cur = c.execute(q, tuple(args))
+        return cur.rowcount
+
+# READ
 
 def get_latest_readings(metric: str, station_id: str = None, n: int = 300):
     with conn() as c:
@@ -116,6 +129,18 @@ def get_readings_since(metric: str, since_iso: str) -> List[Tuple[str,str,str,fl
             (metric, since_iso),
         ).fetchall()
     return rows
+
+def get_readings_between(metric: str, since_utc: str, until_utc: str):
+    with conn() as c:
+        return c.execute(
+            """
+            SELECT ts, station_id, metric, value
+            FROM readings
+            WHERE metric=? AND ts>=? AND ts<? 
+            ORDER BY ts
+            """,
+            (metric, since_utc, until_utc),
+        ).fetchall()
 
 def get_alerts(metric: str = None, since: str = None, limit: int = 1000):
     q = """

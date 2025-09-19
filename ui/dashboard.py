@@ -30,7 +30,7 @@ def load_stations_server(minutes: int, metric: str | None):
     params = {"minutes": minutes}
     if metric:
         params["metric"] = metric
-    data = api_get("/stations/active", **params)  # raises on HTTP != 200
+    data = api_get("/stations/active", **params) # raises on HTTP != 200
     df = pd.DataFrame(data)
     return df
 
@@ -53,7 +53,7 @@ with col1:
     )
 
     # Scope for "active" (any metric vs selected metric)
-    # This radio lives in the left column so the list updates when you change it.
+    # This radio lives in the left column so the list updates when change is detected
     active_scope = st.radio(
         "Active scope",
         ["Any metric", "Selected metric"],

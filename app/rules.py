@@ -12,15 +12,15 @@ _TEMP_BASELINE_DF: pd.DataFrame | None = None
 _TEMP_BASELINE_BUILT_AT: datetime | None = None
 
 # Tuning
-_TEMP_LOOKBACK_DAYS = 21          # use last ~3 weeks for baseline
-_TEMP_MIN_DAYS = 7                # require >=7 distinct days per (station, minute-of-day)
-_TEMP_SIGMA_FLOOR = 0.4           # °C floor for robust sigma
-_TEMP_REBUILD_EVERY_MIN = 180     # rebuild every 3h
+_TEMP_LOOKBACK_DAYS = 21 # use last ~3 weeks for baseline
+_TEMP_MIN_DAYS = 7 # require >=7 distinct days per (station, minute-of-day)
+_TEMP_SIGMA_FLOOR = 0.4 # °C floor for robust sigma
+_TEMP_REBUILD_EVERY_MIN = 180 # rebuild every 3h
 
 # Alert thresholds (human-intuitive)
-_TEMP_HIGH_RESID = 2.5            # °C hotter than usual
-_TEMP_LOW_RESID  = 3.0            # °C colder than usual
-_TEMP_SUSTAINED_TICKS = 2         # require N consecutive ticks
+_TEMP_HIGH_RESID = 2.5 # °C hotter than usual
+_TEMP_LOW_RESID  = 3.0 # °C colder than usual
+_TEMP_SUSTAINED_TICKS = 2 # require N consecutive ticks
 
 # cool-down for simple delta alerts (minutes)
 _SIMPLE_DELTA_COOLDOWN_MIN = getattr(settings, "simple_delta_cooldown_minutes", 3)
@@ -124,10 +124,8 @@ def apply_simple_delta_rules(window_df: pd.DataFrame, metric: str, ts: pd.Timest
 def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
     """
     Emits: RAIN_ONSET, RAIN_INTENSE, RAIN_EASING, RAIN_STOP.
-    Key change: RAIN_STOP requires evidence of rain in the immediately
-    preceding window (prev_k), not just zeros now.
     """
-    W = getattr(settings, "rain_trend_window", 3)                # 3 ticks ≈ 15 min
+    W = getattr(settings, "rain_trend_window", 3) # 3 ticks ≈ 15 min
     onset_k = getattr(settings, "rain_onset_min_intervals", 2)
     calm_mm = getattr(settings, "rain_calm_mm", 0.05)
     cd_min  = getattr(settings, "rain_cooldown_minutes", 20)
@@ -149,7 +147,7 @@ def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
         if len(g) < max(W, onset_k, q + prev_k) + 2:
             continue
 
-        # rolling context
+        # rolling window
         recent_vals = g["value"].tail(W).fillna(0) # last ~15m
         prev_vals   = g["value"].iloc[-2-W:-2].fillna(0) if len(g) >= W+2 else pd.Series([], dtype=float)
 
@@ -201,7 +199,7 @@ def apply_rain_event_rules(window_df: pd.DataFrame, ts: pd.Timestamp):
         # Dry in the most recent q ticks
         stopped_now = (vals.tail(q) <= calm_mm).all()
 
-        # Was there any wet tick in the window just BEFORE the dry streak?
+        # Detect wet tick in the window just BEFORE the dry streak
         if len(vals) >= q + prev_k:
             prev_span = vals.iloc[-(q + prev_k):-q] # the [q ... q + prev_k] window
         else:
@@ -273,7 +271,7 @@ def _build_temp_baseline() -> pd.DataFrame | None:
 
     ts_utc = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     ts_sgt = ts_utc.dt.tz_convert("Asia/Singapore")
-    df["mod"] = ts_sgt.dt.hour * 60 + ts_sgt.dt.minute              # minute-of-day (SGT)
+    df["mod"] = ts_sgt.dt.hour * 60 + ts_sgt.dt.minute # minute-of-day (SGT)
     df["date_sgt"] = ts_sgt.dt.date
 
     def _agg(g: pd.DataFrame):

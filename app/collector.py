@@ -22,7 +22,7 @@ _sess.mount("http://", _adapter)
 def _headers():
     h = {"User-Agent": "Weathering-with-Phew/0.2"}
     if settings.x_api_key:
-        h["X-Api-Key"] = settings.x_api_key  # header case-insensitive
+        h["X-Api-Key"] = settings.x_api_key 
     return h
 
 def _fetch_metric(metric: str, date: str | None = None, pagination_token: str | None = None):
@@ -31,7 +31,7 @@ def _fetch_metric(metric: str, date: str | None = None, pagination_token: str | 
     url = f"{settings.nea_base_url}/{settings.nea_endpoints[metric]}"
     params = {}
     if date:
-        params["date"] = date  # YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss (SGT per docs)
+        params["date"] = date # YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss (SGT)
     if pagination_token:
         params["paginationToken"] = pagination_token
     r = _sess.get(url, headers=_headers(), params=params, timeout=20)

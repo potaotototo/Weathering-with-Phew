@@ -39,7 +39,7 @@ class StationIndex:
         self._tree: Optional[KDTree] = None
         self._coords_km: Optional[np.ndarray] = None
 
-    # ----------- building ------------
+    # Build
 
     def load_from_file(self, path: str):
         if not os.path.exists(path):
@@ -74,8 +74,8 @@ class StationIndex:
         self._id_to_idx = {r[0]: i for i, r in enumerate(self._stations)}
         logger.info("KDTree built for {} stations", len(self._stations))
 
-    # ----------- queries ------------
-
+    # Query
+    
     def ready(self) -> bool:
         return (self._tree is not None) and (self._coords_km is not None) and (len(self._stations) >= 2)
 

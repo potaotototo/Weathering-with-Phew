@@ -5,12 +5,12 @@ from .log import logger
 
 app = FastAPI(title="Weathering with Phew API")
 
-# --- ensure DB schema + hydrate station index at startup ---
+# Ensure DB schema + hydrate station index at startup
 @app.on_event("startup")
 def _startup():
     init_db() 
     try:
-        station_index._hydrate()  # builds KDTree once we have station coords
+        station_index._hydrate() # builds KDTree once station coordinates present
         logger.info("Station index hydrated")
     except Exception as e:
         logger.error(f"Station index hydrate failed: {e}")
@@ -52,7 +52,7 @@ async def delete_alerts_endpoint(
     metric: str | None = None,
     since: str | None = None,
     station_id: str | None = None,
-    type: str | None = None,   # name is fine; it's a param
+    type: str | None = None, 
 ):
     deleted = _delete_alerts(metric=metric, since=since, station_id=station_id, type_=type)
     return {"deleted": deleted}

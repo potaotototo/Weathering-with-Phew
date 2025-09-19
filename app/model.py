@@ -34,7 +34,7 @@ class IsoForestModel:
         )
         self._fitted = False
         self._last_fit_ts = 0.0
-        self._feat_cols = list(_FEAT_COLS)  # persisted schema
+        self._feat_cols = list(_FEAT_COLS) # persisted schema
 
     def fit_if_needed(self, feats: pd.DataFrame, refit_every_sec: int = 3600, min_rows: int = 200):
         if feats is None or len(feats) < min_rows:
