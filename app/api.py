@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Query
-from .store import init_db, get_alerts, get_latest_readings, all_stations, get_active_stations, delete_alerts as _delete_alerts
+from fastapi import FastAPI, Query, HTTPException
+from .store import conn, init_db, get_alerts, get_latest_readings, all_stations, get_active_stations, delete_alerts as _delete_alerts
 from .stations import station_index
 from .log import logger
 from typing import Optional, List, Dict, Any
@@ -113,12 +113,12 @@ async def alerts(
 
 @app.delete("/alerts")
 async def delete_alerts_endpoint(
-    metric: str | None = None,
-    since: str | None = None,
-    station_id: str | None = None,
-    type: str | None = None, 
+    metric: str | None = Query(None),
+    since: str | None = Query(None),
+    station_id: str | None = Query(None),
+    type_: str | None = Query(None, alias="type"),
 ):
-    deleted = _delete_alerts(metric=metric, since=since, station_id=station_id, type_=type)
+    deleted = _delete_alerts(metric=metric, since=since, station_id=station_id, type_=type_)
     return {"deleted": deleted}
 
 @app.get("/latest")
